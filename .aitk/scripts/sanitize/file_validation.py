@@ -61,6 +61,9 @@ def checkSystem(oliveJsonFile: str, system):
     if len(accelerators) != 1:
         printError(f"{oliveJsonFile} should have only one accelerator")
         return False
+    if OlivePropertyNames.Device not in accelerators[0]:
+        printError(f"{oliveJsonFile} accelerator should have device")
+        return False
     eps = accelerators[0][OlivePropertyNames.ExecutionProviders]
     if len(eps) != 1:
         printError(f"{oliveJsonFile} should have only one execution provider")
@@ -160,52 +163,49 @@ def readCheckIpynb(ipynbFile: str, modelItems: dict[str, ModelParameter]):
 
         with open_ex(ipynbFile, "r") as file:
             ipynbContent: str = file.read()
-        allRuntimes: list[str] = []
+        if "winml.py" in ipynbContent:
+            printError(f"{ipynbFile} should not reference 'winml.py'. It is old code")
+        allRuntimes: set[str] = set()
         for name, modelParameter in modelItems.items():
             if modelParameter.runtime == None:
                 printError(f"When checking {ipynbFile}, modelItem {name} does not have runtime!")
                 continue
             testPath = outputModelRelativePath
             importStr = importOnnxruntime
-            if modelParameter.isLLM:
+            if modelParameter.aitkPython:
+                testPath = None
+                importStr = None
+            elif modelParameter.isLLM:
                 testPath = outputModelModelBuilderPath
                 importStr = importOnnxgenairuntime
             elif modelParameter.runtime.values and modelParameter.isIntel:
                 testPath = outputModelIntelNPURelativePath
             for item in [testPath, importStr]:
-                if not re.search(item, ipynbContent):
+                if item and not re.search(item, ipynbContent):
                     printError(f"{ipynbFile} does not have '{item}' for {name}, please use it as input")
             if modelParameter.evalRuntime:
                 runtime = GlobalVars.RuntimeToEPName[modelParameter.evalRuntime]
-                if runtime not in allRuntimes:
-                    allRuntimes.append(runtime.value)
+                allRuntimes.add(runtime.value)
             else:
                 if modelParameter.isIntel:
-                    allRuntimes.append(EPNames.OpenVINOExecutionProvider.value)
+                    allRuntimes.add(EPNames.OpenVINOExecutionProvider.value)
                 elif modelParameter.runtime.values:
                     for runtime in modelParameter.runtime.values:
-                        if runtime not in allRuntimes:
-                            allRuntimes.append(runtime)
+                        allRuntimes.add(runtime)
 
-        targetEP = None
-        if len(allRuntimes) == 2 and EPNames.CPUExecutionProvider.value in allRuntimes:
+        if len(allRuntimes) > 1 and EPNames.CPUExecutionProvider.value in allRuntimes:
             allRuntimes.remove(EPNames.CPUExecutionProvider.value)
-            targetEP = allRuntimes[0]
-        elif len(allRuntimes) == 1:
-            targetEP = allRuntimes[0]
-        elif len(allRuntimes) > 1:
-            # TODO we use QNN as default because currently we only replace this
-            if EPNames.QNNExecutionProvider.value in allRuntimes:
-                targetEP = EPNames.QNNExecutionProvider.value
-            elif EPNames.CPUExecutionProvider.value in allRuntimes:
-                targetEP = EPNames.CPUExecutionProvider.value
-            else:
-                targetEP = allRuntimes[0]
-        if targetEP:
-            targetStr = f'ExecutionProvider=\\"{targetEP}\\"'
-            if ipynbContent.count(targetStr) != 1:
-                printError(f"{ipynbFile} should have 1 {targetStr}")
-        else:
+        foundTargetEP = False
+        for runtime in allRuntimes:
+            targetStr = f'ExecutionProvider=\\"{runtime}\\"'
+            targetCount = ipynbContent.count(targetStr)
+            if targetCount == 1:
+                if foundTargetEP:
+                    printError(f"{ipynbFile} has multiple runtimes, but also has {targetStr}")
+                foundTargetEP = True
+            elif targetCount > 1:
+                printError(f"{ipynbFile} should have 1 {targetStr} but has {targetCount}")
+        if not foundTargetEP:
             printError(f"{ipynbFile} has no runtime for it!")
         return True
     return False
@@ -216,8 +216,8 @@ def readCheckRequirements(requirementsFile: str):
     Check requirements.txt file
     """
     if not os.path.exists(requirementsFile):
-        printWarning(f"{requirementsFile} not exists.")
-        return
+        printWarning(f"{requirementsFile} not exists. Creating an empty one")
+        Path(requirementsFile).touch()
 
     GlobalVars.requirementsCheck.append(requirementsFile)
     with open_ex(requirementsFile, "r") as file:
@@ -226,8 +226,8 @@ def readCheckRequirements(requirementsFile: str):
 
     oldContents = []
     newContents = [
-        "# This file will be installed together with AITK runtime requirements",
-        "# For the full requirements, see AITK",
+        "# This file will be installed together with Foundry Toolkit runtime requirements",
+        "# For the full requirements, see Foundry Toolkit",
     ]
     ready = False
     if len(requirementsLines) >= len(newContents):

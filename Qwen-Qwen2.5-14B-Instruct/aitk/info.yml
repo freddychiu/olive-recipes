@@ -5,6 +5,11 @@ recipes:
     - file: "qwen2_5_ov_config.json"
       devices:
         - gpu
+        - cpu
+      ep: OpenVINOExecutionProvider
+    - file: "qwen2_5_ov_npu_config.json"
+      devices:
+        - npu
       ep: OpenVINOExecutionProvider
     - file: "qwen2_5_trtrtx.json"
       device: gpu
@@ -14,6 +19,6 @@ recipes:
 aitk:
     modelInfo:
         id: "huggingface/Qwen/Qwen2.5-14B-Instruct"
-        version: 3
+        version: 4
         groupId: "huggingface/Qwen/Qwen2.5-1.5B-Instruct"
         groupItemName: "14B"

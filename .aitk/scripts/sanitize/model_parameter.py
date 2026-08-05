@@ -7,14 +7,16 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Union
 
+import pydash
 from deepdiff import DeepDiff
 from model_lab import RuntimeEnum
 from pydantic import BaseModel
 
-from .base import BaseModelClass
+from .base import BaseModelClass, add_schema_to_config
 from .constants import (
+    CONFIG_SCHEMA_URL,
     EPNames,
     OliveDeviceTypes,
     OlivePassNames,
@@ -87,14 +89,15 @@ class Section(BaseModel):
         sectionId: int,
         oliveJson: Any,
         modelList: ModelList,
+        emptyAllowed: bool,
     ):
         if not self.name:
             return False
         # if not self.description:
         #    return False
         # TODO add place holder for General?
-        if not self.parameters and self.phase != PhaseTypeEnum.Conversion:
-            printWarning(f"{_file} self.parameters is empty for {self.phase}.")
+        if not emptyAllowed and not self.parameters:
+            printError(f"{_file} self.parameters is empty for {self.phase}.")
 
         for i, parameter in enumerate(self.parameters):
             if parameter.template:
@@ -112,6 +115,7 @@ class Section(BaseModel):
                 printError(f"{_file} section {sectionId} parameter {i} has error")
 
             # TODO move tag check into Parameter
+            # TODO guess for possible tags
             if parameter.path and Section.datasetPathPattern(parameter.path):
                 if self.phase == PhaseTypeEnum.Quantization:
                     if not parameter.tags or ParameterTagEnum.QuantizationDataset not in parameter.tags:
@@ -119,10 +123,6 @@ class Section(BaseModel):
                 elif self.phase == PhaseTypeEnum.Evaluation:
                     if not parameter.tags or ParameterTagEnum.EvaluationDataset not in parameter.tags:
                         printError(f"{_file} section {sectionId} parameter {i} should have EvaluationDataset tag")
-                if parameter.values:
-                    missing_keys = [key for key in parameter.values if key not in modelList.HFDatasets]
-                    if missing_keys:
-                        printError(f"datasets are not in HFDatasets: {', '.join(str(key) for key in missing_keys)}")
             elif parameter.path and parameter.path.endswith("activation_type"):
                 if not parameter.tags or ParameterTagEnum.ActivationType not in parameter.tags:
                     printError(f"{_file} section {sectionId} parameter {i} should have ActivationType tag")
@@ -138,10 +138,6 @@ class Section(BaseModel):
                 printError(f"{_file} section {sectionId} toggle has error")
 
         return True
-
-
-class ADMNPUConfig(BaseModel):
-    inferenceSettings: Optional[Any] = None
 
 
 class DebugInfo(BaseModel):
@@ -178,7 +174,7 @@ class DebugInfo(BaseModel):
         self.useModelBuilder = getPass(OlivePassNames.ModelBuilder)
         self.useOpenVINOConversion = getPass(OlivePassNames.OpenVINOConversion)
         self.useOpenVINOOptimumConversion = getPass(OlivePassNames.OpenVINOOptimumConversion)
-        self.useQuarkQuantization = getPass(OlivePassNames.QuarkQuantization)
+        self.useQuarkQuantization = getPass(OlivePassNames.QuarkQuantizationVitisAI)
 
         notEmpty = [
             v
@@ -203,38 +199,108 @@ class DebugInfo(BaseModel):
         return not self._use
 
 
+class OptimizationPath(BaseModel):
+    path: str
+    name: Optional[str] = None
+
+    def Check(self, oliveJson: Any, toDisplayName: Dict[str, Dict[str, str]]) -> str | None:
+        if not checkPath(self.path, oliveJson):
+            return None
+
+        value = pydash.get(oliveJson, self.path)
+        # if we have name and name is in mapping, either use result in mapping or value
+        if self.name and self.name in toDisplayName:
+            if value not in toDisplayName[self.name]:
+                printError(f"{self.path} value {value} not in known optimization names for {self.name}")
+                return None
+            return toDisplayName[self.name][value]
+        # if we have name and name is not in mapping, treat value as boolean
+        if self.name:
+            return self.name if value else None
+        # else use value directly
+        return value
+
+
+def _anyRegexMatch(path: str, patterns: Optional[List[str]], localLabel: str) -> bool:
+    """True if any regex in patterns matches path (re.search). Empty/None -> False."""
+    if not patterns:
+        return False
+    for pattern in patterns:
+        try:
+            if re.search(pattern, path):
+                return True
+
+        except re.error as e:
+            printError(f"Invalid regex pattern {pattern!r} for oliveFile ignore list ({localLabel}): {e}")
+
+            return False
+
+    return False
+
+
+class OliveFileConfig(BaseModel):
+    # reference olive file to diff against, resolved the same way as the string oliveFile form
+    ref: str
+    # regex patterns to suppress expected diffs. A DeepDiff path is ignored if any pattern
+    # matches it (re.search). These are applied on top of the built-in filters in _diffOlivePasses.
+    # ignoreAdded -> dictionary_item_added, ignoreRemoved -> dictionary_item_removed,
+    # ignoreChanged -> values_changed (e.g. "ov_io_update" suppresses root['ov_io_update']).
+    ignoreAdded: Optional[List[str]] = None
+    ignoreRemoved: Optional[List[str]] = None
+    ignoreChanged: Optional[List[str]] = None
+
+
 class ModelParameter(BaseModelClass):
     name: str
-    oliveFile: Optional[str] = None
+    oliveFile: Optional[Union[str, Dict[str, Union[str, OliveFileConfig]]]] = None
     # SET AUTOMATICALLY TO TRUE BY MODEL ID
     isLLM: Optional[bool] = None
     isIntel: Optional[bool] = None
     intelRuntimeValues: Optional[List[OliveDeviceTypes]] = None
     # For template using CUDA and no runtime overwrite, we need to set this so we know the target EP
     evalRuntime: Optional[RuntimeEnum] = None
+    evalMetrics: Optional[Dict[str, str]] = None
+    # when we only use random data for evaluation latency
+    evalNoDataConfig: Optional[bool] = None
     debugInfo: Optional[DebugInfo] = None
-    # A SHORTCUT FOR SEVERAL PARAMETERS
+    # TODO A SHORTCUT FOR PythonEnvironment + CUDA, should rename
     # This kind of config will
     # - setup runtimeOverwrite for CUDA EP and others
     #   + the previous EP is used for EPContextBinaryGeneator by PythonEnvironment
-    # - do not support cpu evaluation
-    # - setup executeRuntimeFeatures, pyEnvRuntimeFeatures
     isQNNLLM: Optional[bool] = None
     # SET AUTOMATICALLY TO TRUE WHEN CUDAExecutionProvider
+    # When true, it means some passes need CUDA so user could not run it without
     isGPURequired: Optional[bool] = None
+    # When true, it means some passes could benefit from GPU but could run without GPU
+    isGPUSuggested: Optional[bool] = None
+    # Free memory suggested to convert the model
+    memoryGbSuggested: Optional[int] = None
     needHFLogin: Optional[bool] = None
     runtimeOverwrite: Optional[RuntimeOverwrite] = None
     executeRuntimeFeatures: Optional[List[str]] = None
     evaluationRuntimeFeatures: Optional[List[str]] = None
     pyEnvRuntimeFeatures: Optional[List[str]] = None
-    # it means default template does not use it
-    # for Cpu, None means add
+    # Default is False - CPU execution provider is only added when explicitly set to True
     addCpu: Optional[bool] = None
-    addAmdNpu: Optional[ADMNPUConfig] = None
+    epMinVersions: Optional[Dict[EPNames, str]] = None
+    disableConversionGeneration: Optional[bool] = None
 
     runtime: Optional[Parameter] = None
     runtimeInConversion: Optional[Parameter] = None
+    optimizationPaths: Optional[List[OptimizationPath]] = None
+    optimizationDefault: Optional[str] = None
+    aitkPython: Optional[str] = None
+    # Path (relative to the aitk folder) to a py file that drives the execution process.
+    executePatchPy: Optional[str] = None
     sections: List[Section] = []
+
+    def writeIfChanged(self):
+        newContent = add_schema_to_config(
+            self.model_dump_json(indent=4, exclude_none=True),
+            CONFIG_SCHEMA_URL,
+        )
+        if self._file:
+            BaseModelClass.writeJsonIfChanged(newContent, self._file, self._fileContent)
 
     @staticmethod
     def Read(parameterFile: str):
@@ -262,70 +328,23 @@ class ModelParameter(BaseModelClass):
 
         self.isLLM = isLLM_by_id(modelInfo.id) or None
 
-        if self.sections and self.sections[0].phase == PhaseTypeEnum.Conversion:
-            self.sections = self.sections[1:]
-        self.sections.insert(
-            0,
-            Section(
-                autoGenerated=True,
-                name="Convert",
-                phase=PhaseTypeEnum.Conversion,
-                parameters=[],
-            ),
-        )
-
-        if self.isQNNLLM:
-            self.addCpu = False
+        if not self.disableConversionGeneration:
+            if self.sections and self.sections[0].phase == PhaseTypeEnum.Conversion:
+                self.sections = self.sections[1:]
+            self.sections.insert(
+                0,
+                Section(
+                    autoGenerated=True,
+                    name="Convert",
+                    phase=PhaseTypeEnum.Conversion,
+                    parameters=[],
+                ),
+            )
 
         # Add runtime
         syskey, system = get_target_system(oliveJson)
-        currentEp = system[OlivePropertyNames.Accelerators][0][OlivePropertyNames.ExecutionProviders][0]
-        currentOliveDeviceType = system[OlivePropertyNames.Accelerators][0].get(
-            OlivePropertyNames.Device, OliveDeviceTypes.Any.value
-        )
-
-        if currentEp == EPNames.QNNExecutionProvider.value and currentOliveDeviceType == OliveDeviceTypes.Any.value:
-            currentOliveDeviceType = OliveDeviceTypes.NPU.value
-
-        currentRuntimeRPC = GlobalVars.GetRuntimeRPC(currentEp, currentOliveDeviceType)
-        # use any for default
-        if currentEp == EPNames.OpenVINOExecutionProvider.value:
-            currentRuntimeRPC = RuntimeEnum.IntelAny
-
-        runtimeValues: List[str] = [currentEp]
-        runtimeDisplayNames = [GlobalVars.RuntimeToDisplayName[currentRuntimeRPC]]
-
-        runtimeActions = None
-
-        # CPU always last
-        if self.addCpu != False and currentRuntimeRPC != RuntimeEnum.CPU:
-            runtimeValues.append(GlobalVars.RuntimeToEPName[RuntimeEnum.CPU].value)
-            runtimeDisplayNames.append(GlobalVars.RuntimeToDisplayName[RuntimeEnum.CPU])
-            if runtimeActions is not None:
-                runtimeActions.append([])
-
-        self.runtime = Parameter(
-            autoGenerated=True,
-            name="Evaluate on",
-            type=ParameterTypeEnum.Enum,
-            values=runtimeValues,
-            displayNames=runtimeDisplayNames,
-            path=f"{OlivePropertyNames.Systems}.{syskey}.{OlivePropertyNames.Accelerators}.0.{OlivePropertyNames.ExecutionProviders}.0",
-            readOnly=False,
-        )
-        if currentEp == EPNames.OpenVINOExecutionProvider.value:
-            self.runtime.path = (
-                f"{OlivePropertyNames.Systems}.{syskey}.{OlivePropertyNames.Accelerators}.0.{OlivePropertyNames.Device}"
-            )
-            self.runtime.values = []
-            self.runtime.displayNames = []
-            for tmpDevice in self.getIntelDevices():
-                tmpRuntimeRPC = GlobalVars.GetRuntimeRPC(EPNames.OpenVINOExecutionProvider, tmpDevice)
-                self.runtime.values.append(GlobalVars.RuntimeToOliveDeviceType[tmpRuntimeRPC].value)
-                self.runtime.displayNames.append(GlobalVars.RuntimeToDisplayName[tmpRuntimeRPC])
-
-        self.runtime.actions = runtimeActions
-        self.TryToRemoveReuseCacheInRuntimeAction(oliveJson, modelInfo)
+        currentEp: str = system[OlivePropertyNames.Accelerators][0][OlivePropertyNames.ExecutionProviders][0]
+        self.runtime = self.createRuntime(syskey, system, currentEp)
         if not self.runtime.Check(False, oliveJson, modelList):
             printError(f"{self._file} runtime has error")
 
@@ -339,7 +358,16 @@ class ModelParameter(BaseModelClass):
                 executeEp=EPNames.CUDAExecutionProvider,
                 evaluateUsedInExecute=True,
             )
-            self.executeRuntimeFeatures = ["AutoGptq"]
+
+        if not modelInfo.template and not modelInfo.extension and currentEp != EPNames.OpenVINOExecutionProvider.value:
+            if self.runtimeOverwrite is None:
+                self.runtimeOverwrite = RuntimeOverwrite(
+                    autoGenerated=True,
+                    executeRequirement="General/CPU_py3.12.9",
+                )
+            elif not self.runtimeOverwrite.executeRequirement and not self.runtimeOverwrite.executeEp:
+                self.runtimeOverwrite.executeRequirement = "General/CPU_py3.12.9"
+            GlobalVars.executeRuntimeCheck += 1
 
         if self.runtimeOverwrite and not self.runtimeOverwrite.Check(oliveJson):
             printError(f"{self._file} runtime overwrite has error")
@@ -352,11 +380,15 @@ class ModelParameter(BaseModelClass):
                     if self.debugInfo:
                         conversion = self.debugInfo.getUseX()
                     if not conversion:
-                        conversion = [
+                        conversions = [
                             k
                             for k, v in oliveJson[OlivePropertyNames.Passes].items()
-                            if v[OlivePropertyNames.Type].lower() == OlivePassNames.OnnxConversion
-                        ][0]
+                            if v[OlivePropertyNames.Type].lower()
+                            in [OlivePassNames.OnnxConversion, OlivePassNames.AitkPython]
+                        ]
+                        if len(conversions) == 0:
+                            raise Exception(f"{self._file} has no conversion pass")
+                        conversion = conversions[0]
                     conversionPath = f"{OlivePropertyNames.Passes}.{conversion}"
                     section.toggle = Parameter(
                         autoGenerated=True,
@@ -430,60 +462,101 @@ class ModelParameter(BaseModelClass):
                 if not checkPath(f"{OlivePropertyNames.Evaluators}.{evaluatorName}", oliveJson):
                     printError(f"{self._file} does not have evaluator {evaluatorName}")
 
-            if not section.Check(templates, self._file or "", tmpDevice, oliveJson, modelList):
+            emptyAllowed = (section.phase == PhaseTypeEnum.Conversion) or (
+                section.phase == PhaseTypeEnum.Evaluation and self.evalNoDataConfig is True
+            )
+            if not section.Check(templates, self._file or "", tmpDevice, oliveJson, modelList, emptyAllowed):
                 printError(f"{self._file} section {tmpDevice} has error")
 
-        if (
-            currentEp == EPNames.CUDAExecutionProvider.value
-            or self.runtimeOverwrite
-            and self.runtimeOverwrite.executeEp == EPNames.CUDAExecutionProvider
+        if currentEp == EPNames.CUDAExecutionProvider.value or (
+            self.runtimeOverwrite and self.runtimeOverwrite.executeEp == EPNames.CUDAExecutionProvider
         ):
             self.isGPURequired = True
-        else:
-            self.isGPURequired = None
 
         # model builder uses AutoConfig.from_pretrained(hf_name, token=hf_token, trust_remote_code=True, **extra_kwargs) and trust_remote_code=True requires token
         first_pass_value = next(iter(oliveJson[OlivePropertyNames.Passes].values()), None)
         if first_pass_value and first_pass_value[OlivePropertyNames.Type].lower() == OlivePassNames.ModelBuilder:
             self.needHFLogin = True
 
-        self.checkPhase(oliveJson)
+        if self.evalMetrics and len(self.evalMetrics) > 3:
+            printError(f"{self._file} evalMetrics should not have more than 3 metrics")
+
+        self.checkPhase(oliveJson, self.evalNoDataConfig or False)
         self.CheckRuntimeInConversion(oliveJson, modelList, modelInfo)
         self.checkOliveFile(oliveJson, modelInfo)
+        self.checkExecutePatchPy()
         self.checkRequirements(modelList)
+        self.checkOptimizationPaths(modelList.OptimizationToDisplayName, oliveJson, modelInfo)
         if self.debugInfo and self.debugInfo.isEmpty():
             self.debugInfo = None
         self.writeIfChanged()
 
-    def TryToRemoveReuseCacheInRuntimeAction(self, oliveJson: Any, modelInfo: ModelInfo):
-        if not self.runtime or not self.runtime.values:
-            printError(f"{self._file} runtime values is empty, cannot remove reuse_cache")
-            return
-        # Find all passes that have reuse_cache field
-        reuse_cache_paths = []
-        if OlivePropertyNames.Passes in oliveJson:
-            for pass_key, pass_value in oliveJson[OlivePropertyNames.Passes].items():
-                if "reuse_cache" in pass_value:
-                    reuse_cache_path = f"{OlivePropertyNames.Passes}.{pass_key}.reuse_cache"
-                    reuse_cache_paths.append(reuse_cache_path)
+    def createRuntime(self, syskey: str, system: Dict[str, Any], currentEp: str):
+        # Get currentRuntimeRPC
+        currentOliveDeviceType = system[OlivePropertyNames.Accelerators][0].get(
+            OlivePropertyNames.Device, OliveDeviceTypes.Any.value
+        )
 
-        if reuse_cache_paths:
-            # Previously, in debug mode for olive, this will throw exception 'file is occupied' for ov recipes
-            # Seem fixed here https://github.com/microsoft/Olive/pull/2017/files
-            return None
-            if self.runtime.actions is None:
-                self.runtime.actions = []
-            for i in range(len(self.runtime.values)):
-                if i >= len(self.runtime.actions):
-                    self.runtime.actions.append([])
-                for tmpPath in reuse_cache_paths:
-                    self.runtime.actions[i].append(
-                        ParameterAction(
-                            path=tmpPath,
-                            type=ParameterActionTypeEnum.Delete,
-                        )
+        if currentEp == EPNames.QNNExecutionProvider.value and currentOliveDeviceType == OliveDeviceTypes.Any.value:
+            currentOliveDeviceType = OliveDeviceTypes.NPU.value
+
+        currentRuntimeRPC = GlobalVars.GetRuntimeRPC(currentEp, currentOliveDeviceType)
+
+        runtimeValues: List[str] = []
+        runtimeDisplayNames = []
+        runtimePath: str = ""
+        runtimeActions = None
+
+        if currentEp == EPNames.OpenVINOExecutionProvider.value:
+            runtimePath = (
+                f"{OlivePropertyNames.Systems}.{syskey}.{OlivePropertyNames.Accelerators}.0.{OlivePropertyNames.Device}"
+            )
+            for tmpDevice in self.getIntelDevices():
+                tmpRuntimeRPC = GlobalVars.GetRuntimeRPC(EPNames.OpenVINOExecutionProvider, tmpDevice)
+                runtimeValues.append(GlobalVars.RuntimeToOliveDeviceType[tmpRuntimeRPC].value)
+                runtimeDisplayNames.append(GlobalVars.RuntimeToDisplayName[tmpRuntimeRPC])
+        else:
+            runtimePath = f"{OlivePropertyNames.Systems}.{syskey}.{OlivePropertyNames.Accelerators}.0.{OlivePropertyNames.ExecutionProviders}.0"
+            runtimeList = [currentRuntimeRPC]
+            # CPU always last
+            if self.addCpu and currentRuntimeRPC != RuntimeEnum.CPU:
+                runtimeList.append(RuntimeEnum.CPU)
+            if len(runtimeList) > 1:
+                runtimeActions = []
+
+            def addEP(runtimeEnum: RuntimeEnum):
+                runtimeValues.append(GlobalVars.RuntimeToEPName[runtimeEnum].value)
+                runtimeDisplayNames.append(GlobalVars.RuntimeToDisplayName[runtimeEnum])
+                if runtimeActions is not None:
+                    runtimeActions.append(
+                        [
+                            ParameterAction(
+                                type=ParameterActionTypeEnum.Update,
+                                path=runtimePath,
+                                value=GlobalVars.RuntimeToEPName[runtimeEnum].value,
+                            ),
+                            ParameterAction(
+                                type=ParameterActionTypeEnum.Update,
+                                path=f"{OlivePropertyNames.Systems}.{syskey}.{OlivePropertyNames.Accelerators}.0.{OlivePropertyNames.Device}",
+                                value=GlobalVars.RuntimeToOliveDeviceType[runtimeEnum].value,
+                            ),
+                        ]
                     )
-        return None
+
+            for runtime in runtimeList:
+                addEP(runtime)
+
+        self.runtime = Parameter(
+            autoGenerated=True,
+            name="Evaluate on",
+            type=ParameterTypeEnum.Enum,
+            values=runtimeValues,
+            displayNames=runtimeDisplayNames,
+            path=runtimePath,
+            actions=runtimeActions,
+            readOnly=False,
+        )
+        return self.runtime
 
     def CheckRuntimeInConversion(self, oliveJson: Any, modelList: ModelList, modelInfo: ModelInfo):
         self.runtimeInConversion = None
@@ -553,7 +626,7 @@ class ModelParameter(BaseModelClass):
             if not self.runtimeInConversion.Check(False, oliveJson, modelList):
                 printError(f"{self._file} runtime in conversion has error")
 
-    def checkPhase(self, oliveJson: Any):
+    def checkPhase(self, oliveJson: Any, evalNoDataConfig: bool):
         allPhases = [section.phase for section in self.sections]
         if len(allPhases) == 1 and allPhases[0] == PhaseTypeEnum.Conversion:
             pass
@@ -576,22 +649,120 @@ class ModelParameter(BaseModelClass):
         if (
             PhaseTypeEnum.Evaluation in allPhases
             and PhaseTypeEnum.Quantization in allPhases
-            and len(oliveJson[OlivePropertyNames.DataConfigs]) != 2
+            and not evalNoDataConfig
+            and (OlivePropertyNames.DataConfigs not in oliveJson or len(oliveJson[OlivePropertyNames.DataConfigs]) != 2)
         ):
-            printWarning(f"{self._file}'s olive json should have two data configs for evaluation")
+            printError(f"{self._file}'s olive json should have two data configs for evaluation")
+
+    def _diffOlivePasses(
+        self,
+        localLabel: str,
+        refPasses: Any,
+        localPasses: Any,
+        refName: str,
+        ignoreConfig: Optional[OliveFileConfig] = None,
+    ):
+        diff = DeepDiff(refPasses, localPasses)
+
+        ignoreAdded = ignoreConfig.ignoreAdded if ignoreConfig else None
+        ignoreRemoved = ignoreConfig.ignoreRemoved if ignoreConfig else None
+        ignoreChanged = ignoreConfig.ignoreChanged if ignoreConfig else None
+
+        addeds: list[str] = diff.pop("dictionary_item_added", [])
+        newAddeds = []
+        for added in addeds:
+            if not added.endswith("['save_as_external_data']") and not _anyRegexMatch(added, ignoreAdded, localLabel):
+                newAddeds.append(added)
+        if newAddeds:
+            diff["dictionary_item_added"] = newAddeds
+
+        removeds: list[str] = diff.pop("dictionary_item_removed", [])
+        newRemoveds = []
+        for removed in removeds:
+            if removed != "root['add_metadata']" and not _anyRegexMatch(removed, ignoreRemoved, localLabel):
+                newRemoveds.append(removed)
+        if newRemoveds:
+            diff["dictionary_item_removed"] = newRemoveds
+
+        changeds: dict[str, Any] = diff.pop("values_changed", {})
+        newChangeds = {}
+        for changed in changeds:
+            if not (
+                changed.endswith("['data_config']")
+                or changed.endswith("['user_script']")
+                or changed.endswith("['save_as_external_data']")
+            ) and not _anyRegexMatch(changed, ignoreChanged, localLabel):
+                newChangeds[changed] = changeds[changed]
+        if newChangeds:
+            diff["values_changed"] = newChangeds
+
+        if diff:
+            printWarning(f"{localLabel} different from {refName}\r\n{diff}\r\n")
+        GlobalVars.oliveCheck += 1
+
+    def _resolveRefFile(self, refFile: str) -> Optional[Path]:
+        if refFile.startswith("o:"):
+            if not GlobalVars.olivePath:
+                return None
+            return Path(GlobalVars.olivePath) / "examples" / refFile[2:]
+        if not self._file:
+            raise Exception("Internal error: _file is not set")
+        return Path(self._file).parent.parent / refFile
 
     def checkOliveFile(self, oliveJson: Any, modelInfo: ModelInfo):
         if modelInfo.extension:
             return
         if modelInfo.template:
             return
-        if not self.oliveFile:
+
+        oliveFileRef = self.oliveFile
+
+        if isinstance(oliveFileRef, dict):
+            # key: local olive file relative to the aitk folder (same folder as the json.config)
+            # value: reference file to diff against, resolved the same way as the string oliveFile
+            if not self._file:
+                raise Exception("Internal error: _file is not set")
+            for localFile, refValue in oliveFileRef.items():
+                # value is either a plain reference path (str) or a config object carrying
+                # the reference path plus per-file regex ignores for expected diffs.
+                if isinstance(refValue, OliveFileConfig):
+                    refFile = refValue.ref
+                    ignoreConfig: Optional[OliveFileConfig] = refValue
+                else:
+                    refFile = refValue
+                    ignoreConfig = None
+                localPath = Path(self._file).parent / localFile
+                if not localPath.exists():
+                    printError(f"{self._file}'s oliveFile key {localFile!r} does not exist")
+                    continue
+                refPath = self._resolveRefFile(refFile)
+                if refPath is None:
+                    continue
+                if not refPath.exists():
+                    printError(f"{self._file}'s oliveFile value {refFile!r} does not exist")
+                    continue
+                with open_ex(localPath, "r") as f:
+                    localJson = json.load(f)
+                with open_ex(refPath, "r") as f:
+                    refJson = json.load(f)
+                label = "/".join(Path(self._file).parts[-3:-1]) + "/" + localFile
+                self._diffOlivePasses(
+                    label,
+                    refJson[OlivePropertyNames.Passes],
+                    localJson[OlivePropertyNames.Passes],
+                    refFile,
+                    ignoreConfig,
+                )
+            return
+
+        if not oliveFileRef:
             if (
                 self.runtime
                 and self.runtime.displayNames
                 and self.runtime.displayNames[0]
                 in [
                     GlobalVars.RuntimeToDisplayName[RuntimeEnum.DML],
+                    # TODO this warning it is useless now
                     GlobalVars.RuntimeToDisplayName[RuntimeEnum.AMDGPU],
                     GlobalVars.RuntimeToDisplayName[RuntimeEnum.IntelCPU],
                     GlobalVars.RuntimeToDisplayName[RuntimeEnum.IntelGPU],
@@ -601,59 +772,29 @@ class ModelParameter(BaseModelClass):
                 return
             printWarning(f"{self._file} does not have oliveFile")
             return
-
-        if self._file:
-            # relative to aitk folder
-            oliveFile = Path(self._file).parent.parent / self.oliveFile
-            if not oliveFile.exists():
-                printWarning(f"{self._file}'s oliveFile {self.oliveFile} does not exist")
-                return
-            with open_ex(oliveFile, "r") as file:
-                oliveFileJson = json.load(file)
-        else:
-            raise Exception("Internal error: _file is not set")
-
-        diff = DeepDiff(
-            oliveFileJson[OlivePropertyNames.Passes],
-            oliveJson[OlivePropertyNames.Passes],
+        oliveFile = self._resolveRefFile(oliveFileRef)
+        if oliveFile is None:
+            return
+        if not oliveFile.exists():
+            printError(f"{self._file}'s oliveFile {oliveFileRef} does not exist")
+            return
+        with open_ex(oliveFile, "r") as file:
+            oliveFileJson = json.load(file)
+        label = "/".join(Path(self._file if self._file else "UNKNOWN").parts[-3:])
+        self._diffOlivePasses(
+            label, oliveFileJson[OlivePropertyNames.Passes], oliveJson[OlivePropertyNames.Passes], oliveFileRef
         )
 
-        addeds: list[str] = diff.pop("dictionary_item_added", [])
-        newAddeds = []
-        for added in addeds:
-            if added.endswith("['save_as_external_data']"):
-                # We add it to align model format
-                pass
-            else:
-                newAddeds.append(added)
-        if newAddeds:
-            diff["dictionary_item_added"] = newAddeds
-
-        removeds: list[str] = diff.pop("dictionary_item_removed", [])
-        newRemoveds = []
-        for removed in removeds:
-            if removed == "root['add_metadata']":
-                pass
-            else:
-                newRemoveds.append(removed)
-        if newRemoveds:
-            diff["dictionary_item_removed"] = newRemoveds
-
-        changeds: dict[str, Any] = diff.pop("values_changed", {})
-        newChangeds = {}
-        for changed in changeds:
-            if changed.endswith("['data_config']") or changed.endswith("['user_script']"):
-                # Data config name or *.py could be different
-                pass
-            else:
-                newChangeds[changed] = changeds[changed]
-        if newChangeds:
-            diff["values_changed"] = newChangeds
-
-        if diff:
-            path = Path(self._file if self._file else "UNKNOWN")
-            printWarning(f"{"/".join(path.parts[-3:])} different from {self.oliveFile}\r\n{diff}")
-        GlobalVars.oliveCheck += 1
+    def checkExecutePatchPy(self):
+        if not self.executePatchPy:
+            return
+        if not self._file:
+            raise Exception("Internal error: _file is not set")
+        pyFile = Path(self._file).parent / self.executePatchPy
+        if not pyFile.exists():
+            printError(f"{self._file}'s executePatchPy {self.executePatchPy} does not exist")
+            return
+        GlobalVars.executePatchPyCheck += 1
 
     def checkDebugInfo(self, oliveJson: Any):
         self.debugInfo = DebugInfo()
@@ -696,6 +837,25 @@ class ModelParameter(BaseModelClass):
         if self.evaluationRuntimeFeatures:
             for feature in self.evaluationRuntimeFeatures:
                 self.checkRequirement(req_path, f"{eval_runtime.value}-{feature}")
+
+    def checkOptimizationPaths(self, toDisplayName: Dict[str, Dict[str, str]], oliveJson: Any, modelInfo: ModelInfo):
+        if modelInfo.template or modelInfo.extension:
+            return
+        if not self.optimizationPaths:
+            printError(f"{self._file} optimizationPaths is not set")
+            return
+        optimizationDefaults = []
+        for optimizationPath in self.optimizationPaths:
+            displayName = optimizationPath.Check(oliveJson, toDisplayName)
+            if displayName:
+                optimizationDefaults.append(displayName)
+            else:
+                printError(f"{self._file} optimization path {optimizationPath.path} has error")
+                return
+        if optimizationDefaults:
+            self.optimizationDefault = " ".join(optimizationDefaults)
+        else:
+            printError(f"{self._file} optimizationDefault is not set")
 
     def checkRequirement(self, path: Path, name: str):
         file = path / f"{name}.txt" if "_py" in name else path / f"requirements-{name}.txt"

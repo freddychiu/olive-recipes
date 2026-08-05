@@ -21,6 +21,7 @@ class IconEnum(Enum):
     qwen = "qwen"
     mistralai = "mistralai"
     HuggingFace = "HuggingFace"
+    onnx = "onnx"
 
 
 class ArchitectureEnum(Enum):
@@ -32,7 +33,6 @@ class ArchitectureEnum(Enum):
 
 class ModelStatusEnum(Enum):
     Ready = "Ready"
-    Coming = "Coming"
     Hide = "Hide"
 
 
@@ -68,6 +68,7 @@ class ParameterTagEnum(Enum):
     EvaluationDatasetSubset = "EvaluationDatasetSubset"
     EvaluationDatasetSplit = "EvaluationDatasetSplit"
     DependsOnDataset = "DependsOnDataset"
+    # TODO clean up unused tags
     ActivationType = "ActivationType"
     WeightType = "WeightType"
 
@@ -106,6 +107,9 @@ class OliveDeviceTypes(Enum):
 # Pass name is case insensitive, so we use lower case for all pass names
 # Should sort by value
 class OlivePassNames:
+    AitkPython = "aitkpython"
+    GptqModel = "gptqmodel"
+    GptqQuantizer = "gptqquantizer"
     ModelBuilder = "modelbuilder"
     NVModelOptQuantization = "nvmodeloptquantization"
     OnnxFloatToFloat16 = "onnxfloattofloat16"
@@ -118,7 +122,7 @@ class OlivePassNames:
     OpenVINOOptimumConversion = "openvinooptimumconversion"
     OpenVINOQuantization = "openvinoquantization"
     OrtTransformersOptimization = "orttransformersoptimization"
-    QuarkQuantization = "quarkquantization"
+    QuarkQuantizationVitisAI = "quarkquantizationvitisai"
 
 
 # Should sort by value
@@ -131,6 +135,7 @@ class OlivePropertyNames:
     DataConfigs = "data_configs"
     DataName = "data_name"
     Dataset = "dataset"
+    DataType = "data_type"
     Device = "device"
     Engine = "engine"
     EvaluateInputModel = "evaluate_input_model"
@@ -138,17 +143,21 @@ class OlivePropertyNames:
     Evaluators = "evaluators"
     ExecutionProviders = "execution_providers"
     ExtraArgs = "extra_args"
+    Float16 = "float16"
     Host = "host"
     LoadDatasetConfig = "load_dataset_config"
     MaxSamples = "max_samples"
+    MaxSeqLen = "max_seq_len"
     Metrics = "metrics"
     Name = "name"
     NumCalibData = "num_calib_data"
     OutputDir = "output_dir"
+    OvQuantConfig = "ov_quant_config"
     Passes = "passes"
     Precision = "precision"
     PreProcessDataConfig = "pre_process_data_config"
     PythonEnvironmentPath = "python_environment_path"
+    QuantScheme = "quant_scheme"
     ExternalData = "save_as_external_data"
     Split = "split"
     Subset = "subset"
@@ -157,7 +166,12 @@ class OlivePropertyNames:
     TargetDevice = "target_device"
     Type = "type"
     UserConfig = "user_config"
+    UserScript = "user_script"
+    WeightFormat = "weight_format"
 
+
+# Schema URL for generated config files
+CONFIG_SCHEMA_URL = "https://github.com/microsoft/olive-recipes/raw/refs/heads/main/.aitk/configs/config_schema.json"
 
 # Path constants
 outputModelRelativePath = r"\\\"./model/model.onnx\\\""

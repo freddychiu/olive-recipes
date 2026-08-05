@@ -32,8 +32,11 @@ def shouldCheckModel(rootDir: str, configDir: str, model: ModelInfo) -> str | No
 def main():
     argparser = argparse.ArgumentParser(description="Check model lab configs")
     argparser.add_argument("-v", "--verbose", action="store_true", help="Verbose mode")
+    # for recipes not migrated https://github.com/microsoft/Olive/tree/rel-0.9.2/examples
+    argparser.add_argument("-o", "--olive", default="", help="Olive path to check recipes")
     args = argparser.parse_args()
     GlobalVars.verbose = args.verbose
+    GlobalVars.olivePath = args.olive
 
     # need to resolve due to d:\ vs D:\
     rootDir = Path(__file__).parent.parent.parent.parent.resolve(strict=False)
@@ -60,7 +63,7 @@ def main():
             version = model.version
             modelVerDir = modelDir if model.relativePath else os.path.join(modelDir, str(version))
 
-            # process copy
+            # process copy (post phase — .json.config copies; winml.py is auto-ensured earlier in project_processor)
             copyConfigFile = os.path.join(modelVerDir, "_copy.json.config")
             if os.path.exists(copyConfigFile):
                 copyConfig = CopyConfig.Read(copyConfigFile)

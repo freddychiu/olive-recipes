@@ -4,6 +4,7 @@ Parameter classes for model configuration
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Union
 
 import pydash
@@ -207,16 +208,23 @@ class Parameter(BaseModel):
                         if value != self.values[0]:
                             printError(f"Value {value} not the first in values for {self.path}")
                             return False
-                        for i in range(len(self.values) - 1):
-                            value_in_list = self.values[i + 1]
-                            if modelList and value_in_list not in modelList.DatasetSplit:
-                                printError(f"Value {value_in_list} not in DatasetSplit for {self.path}")
-                                return False
-                            if modelList and value_in_list not in modelList.DatasetSubset:
-                                # No error for this, just warning
-                                printWarning(
-                                    f"Value {value_in_list} not in DatasetSubset for {self.path}. Could be acceptable if it doesn't have subset"
-                                )
+                        if modelList:
+                            for i in range(len(self.values)):
+                                value_in_list = self.values[i]
+                                if value_in_list not in modelList.HFDatasets:
+                                    printError(f"Value {value_in_list} not in HFDatasets for {self.path}")
+                                    return False
+                                if i == 0:
+                                    # The first one doesn't need to be in DatasetSplit or DatasetSubset
+                                    continue
+                                if value_in_list not in modelList.DatasetSplit:
+                                    printError(f"Value {value_in_list} not in DatasetSplit for {self.path}")
+                                    return False
+                                if value_in_list not in modelList.DatasetSubset:
+                                    # No error for this, just warning
+                                    printWarning(
+                                        f"Value {value_in_list} not in DatasetSubset for {self.path}. Could be acceptable if it doesn't have subset"
+                                    )
                     elif value and value not in self.values:
                         printError(f"Value {value} not in values for {self.path}")
                         return False
@@ -261,6 +269,8 @@ def readCheckParameterTemplate(filePath: str):
     for key, parameter in parameters.items():
         if not parameter.Check(True):
             printError(f"{filePath} parameter {key} has error")
-    newContent = adapter.dump_json(parameters, indent=4, exclude_none=True).decode("utf-8")
+    newContent = json.dumps(
+        adapter.dump_python(parameters, exclude_none=True, mode="json"), indent=4, ensure_ascii=True
+    )
     BaseModelClass.writeJsonIfChanged(newContent, filePath, fileContent)
     return parameters

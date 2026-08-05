@@ -6,17 +6,46 @@ import inspect
 import json
 import os
 from contextlib import contextmanager
-from typing import Any
+from pathlib import Path
+from typing import Any, Iterator, Tuple
 
 import pydash
+import yaml
 from model_lab import RuntimeEnum
 
 from .constants import EPNames, OliveDeviceTypes, OlivePropertyNames
 
 
+def iter_aitk_info_yml(root_dir: Path) -> Iterator[Tuple[Path, dict]]:
+    """Yield (yml_file, yaml_object) for each info.yml under root_dir that has
+    a top-level `aitk` key.
+
+    Files that fail to parse are skipped with a printed warning. An info.yml
+    sitting under a folder literally named `aitk` but missing the `aitk` key
+    raises KeyError, matching the invariant enforced by project_processor.
+    """
+    for yml_file in root_dir.rglob("info.yml"):
+        try:
+            with yml_file.open("r", encoding="utf-8") as f:
+                yaml_object = yaml.safe_load(f.read())
+        except yaml.YAMLError as e:
+            print(f"Error reading {yml_file}: {e}")
+            continue
+        if not isinstance(yaml_object, dict):
+            continue
+        aitk = yaml_object.get("aitk")
+        if not aitk:
+            if yml_file.parent.name == "aitk":
+                raise KeyError(f"aitk not found in {yml_file}")
+            continue
+        yield yml_file, yaml_object
+
+
 class GlobalVars:
     errorList = []
     verbose = False
+    olivePath = None
+    fillPipelineTags = False
     # Initialize checks
     pathCheck = 0
     configCheck = []
@@ -32,6 +61,9 @@ class GlobalVars:
     copyCheck = 0
     licenseCheck = 0
     venvRequirementsCheck = set()
+    winmlCopyCheck = 0
+    executeRuntimeCheck = 0
+    executePatchPyCheck = 0
 
     oliveCheck = 0
     RuntimeToEPName = {
@@ -60,6 +92,7 @@ class GlobalVars:
         RuntimeEnum.AMDNPU: OliveDeviceTypes.NPU,
         RuntimeEnum.AMDGPU: OliveDeviceTypes.GPU,
         RuntimeEnum.NvidiaGPU: OliveDeviceTypes.GPU,
+        RuntimeEnum.NvidiaTRTRTX: OliveDeviceTypes.GPU,
         RuntimeEnum.DML: OliveDeviceTypes.GPU,
         RuntimeEnum.WebGPU: OliveDeviceTypes.GPU,
     }
@@ -105,7 +138,7 @@ class GlobalVars:
             file.write("\n")
 
     @classmethod
-    def GetRuntimeRPC(cls, epName: EPNames, oliveDeviceType: OliveDeviceTypes) -> RuntimeEnum:
+    def GetRuntimeRPC(cls, epName: EPNames | str, oliveDeviceType: OliveDeviceTypes | str) -> RuntimeEnum:
         # Accept epName as either Enum or string, convert to Enum if needed
         if not isinstance(epName, EPNames):
             epName = EPNames(epName)
@@ -186,8 +219,8 @@ def open_ex(file_path, mode):
 
 
 def get_target_system(oliveJson: Any):
-    syskey = oliveJson[OlivePropertyNames.Target]
-    sysValue = oliveJson[OlivePropertyNames.Systems][syskey]
+    syskey: str = oliveJson[OlivePropertyNames.Target]
+    sysValue: dict = oliveJson[OlivePropertyNames.Systems][syskey]
     return syskey, sysValue
 
 
@@ -195,12 +228,6 @@ def checkPath(path: str, oliveJson: Any, printOnNotExist: bool = True):
     printInfo(path)
     GlobalVars.pathCheck += 1
     if pydash.get(oliveJson, path) is None:
-        syskey, system = get_target_system(oliveJson)
-        currentEp = system[OlivePropertyNames.Accelerators][0][OlivePropertyNames.ExecutionProviders][0]
-        # TODO some ov recipes do not have device but we set it in config
-        if path == f"systems.{syskey}.accelerators.0.device" and currentEp == EPNames.OpenVINOExecutionProvider.value:
-            printWarning(f"Not in olive json: {path}")
-            return True
         if printOnNotExist:
             printError(f"Not in olive json: {path}")
         return False
@@ -212,22 +239,44 @@ def isLLM_by_id(id: str) -> bool:
     return any(check in id for check in check_list)
 
 
+# Projects that are themselves canonical winml.py sources and should not have
+# a winml.py copy entry auto-added to their _copy.json.config.
+WINML_COPY_EXEMPT_IDS = {
+    "huggingface/Intel/bert-base-uncased-mrpc",
+    "huggingface/deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    "huggingface/openai/whisper-large-v3-turbo",
+}
+
+
+# Canonical winml.py sources. Paths are relative to the project's aitk folder
+# (matches the CopyConfig `src` format).
+WINML_SRC_LLM = "../../deepseek-ai-DeepSeek-R1-Distill-Qwen-1.5B/aitk/winml.py"
+WINML_SRC_NON_LLM = "../../intel-bert-base-uncased-mrpc/aitk/winml.py"
+WINML_SRC_BOTH = "../../openai-whisper-large-v3-turbo/aitk/winml.py"
+
+
+# Placeholder for future models
+WINML_COPY_BOTH_IDS = {}
+
+
+def winml_copy_src_for(model_id: str) -> str:
+    if model_id in WINML_COPY_BOTH_IDS:
+        return WINML_SRC_BOTH
+    return WINML_SRC_LLM if isLLM_by_id(model_id) else WINML_SRC_NON_LLM
+
+
 # TODO align with Skylight\vscode\ai-mlstudio\src\model-lab\utilities\runtimeUtils.ts
 def get_execute_runtime(runtime: RuntimeEnum) -> RuntimeEnum:
     if runtime in [RuntimeEnum.IntelAny, RuntimeEnum.IntelCPU, RuntimeEnum.IntelGPU, RuntimeEnum.IntelNPU]:
         return RuntimeEnum.IntelNPU
     if runtime == RuntimeEnum.NvidiaGPU:
         return RuntimeEnum.NvidiaGPU
-    if runtime == RuntimeEnum.NvidiaTRTRTX:
-        return RuntimeEnum.WCR_CUDA
     return RuntimeEnum.WCR
 
 
 def get_eval_runtime(runtime: RuntimeEnum, isLLM: bool) -> RuntimeEnum:
     if runtime == RuntimeEnum.QNN and isLLM:
         return RuntimeEnum.QNN_LLLM
-    if runtime == RuntimeEnum.NvidiaTRTRTX:
-        return RuntimeEnum.WCR_CUDA
     return RuntimeEnum.WCR
 
 

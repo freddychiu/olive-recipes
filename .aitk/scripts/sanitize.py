@@ -9,9 +9,9 @@ Auto-formats all Python scripts in the scripts directory on every run.
 import sys
 from pathlib import Path
 
-from auto_formatter import auto_format_scripts
 from project_processor import project_processor
 from requirements_check import requirements_check
+from ruff_check import ruff_check
 from sanitize.main import main
 from sanitize.utils import GlobalVars
 
@@ -47,9 +47,14 @@ if __name__ == "__main__":
     if "-v" in sys.argv or "--verbose" in sys.argv:
         GlobalVars.verbose = True
 
-    # Auto-format scripts before running sanitize
-    if "--format_scripts" in sys.argv:
-        auto_format_scripts()
+    # When set, project_processor will fetch pipeline_tags from HuggingFace API
+    # and populate the pipeline_tags field for each model in model_list.json.
+    # Without this flag, existing pipeline_tags values are preserved from the
+    # current model_list.json.
+    if "--fill_pipeline_tags" in sys.argv:
+        GlobalVars.fillPipelineTags = True
+
+    ruff_check(fix=True)
     requirements_check()
     project_processor()
     run_main()

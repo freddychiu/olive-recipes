@@ -44,9 +44,9 @@ recipes:
     eps: VitisAIExecutionProvider
 ```
 
-### AITK specific configuration
+### Foundry Toolkit specific configuration
 
-`info.yml` can also include configuration used by AITK specific models. All relevant information should be rooted under the **aitk** node.
+`info.yml` can also include configuration used by Foundry Toolkit specific models. For compatibility with existing tooling, all relevant information should remain rooted under the **aitk** node in the YAML.
 
 ```yaml
 aitk:
@@ -60,6 +60,19 @@ aitk:
     file: "bert_ov.json"
     file: "bert_trtrtx.json"
 ```
+
+## Setup CI for Olive recipes
+CI for Olive recipes can be configured to run automatically by adding `olive_ci.json` file under the model directory. Each entry in the file is configured to run as an independent GitHub Actions job.
+
+Each `olive_ci.json` is unique to the folder it contains and, at the minimum, should contain the following information for each root entry:
+
+* name [str]: a unique identifier to locate specific job
+* os [str]: options are ubuntu or windows
+* device [str]: options are cpu or cuda.
+* requirements_file [str]: relative file path to requirements file to use for this job. The job will use this file to setup the environment to run the commands.
+* command [str]: a list of commands concatenated by either '&&' (on unix-like platforms) or separated by ';' (on windows platforms). This entry can also point to a shell or python script which can implement more complicated/advanced logic to run. When referring to a shell or python script, the path is relative to the location of the corresponding `olive_ci.json` file.
+
+For an example, refer to the following [olive_ci.json](intel-bert-base-uncased-mrpc/oci/olive_ci.json) implementation.
 
 ## Coding conventions and standards
 
